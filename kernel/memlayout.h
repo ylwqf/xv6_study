@@ -29,6 +29,8 @@
 #define E1000_IRQ 33
 #endif
 
+#define CLINT 0x02000000L
+
 // qemu puts platform-level interrupt controller (PLIC) here.
 #define PLIC 0x0c000000L
 #define PLIC_PRIORITY (PLIC + 0x0)
@@ -41,7 +43,7 @@
 // for use by the kernel and user pages
 // from physical address 0x80000000 to PHYSTOP.
 #define KERNBASE 0x80000000L
-#define PHYSTOP (KERNBASE + 128*1024*1024)
+#define PHYSTOP (KERNBASE + 128L*1024*1024)
 
 // map the trampoline page to the highest address,
 // in both user and kernel space.
