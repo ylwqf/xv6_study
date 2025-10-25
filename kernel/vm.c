@@ -6,9 +6,7 @@
 #include "defs.h"
 #include "fs.h"
 
-/*
- * the kernel's page table.
- */
+
 pagetable_t kernel_pagetable;
 
 extern char etext[];  // kernel.ld sets this to end of kernel code.
@@ -309,33 +307,33 @@ int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
-  uint64 pa, i;
+  uint64 pa;
+  uint64 i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+
     pa = PTE2PA(*pte);
+    if(*pte & PTE_W)
+      *pte = (*pte & (~PTE_W)) | PTE_COW; // set the write flag fault
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    //map the child pte to it's parent's phyical address
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
+    add_ref(pa);
   }
   return 0;
 
  err:
+
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
-
-// mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
 void
 uvmclear(pagetable_t pagetable, uint64 va)
@@ -359,6 +357,10 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
+    if(cow_check(pagetable, va0) != 0)
+    {
+      pa0 = cow_copy(pagetable, va0);
+    }
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
@@ -438,5 +440,75 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+int
+cow_check(pagetable_t pagetable, uint64 va)
+{
+  if(va > MAXVA)
+    return 0;
+
+  pte_t *pte = walk(pagetable, va, 0);
+
+  if(pte == 0)
+    return 0;
+  // printf("judge here 0\n");
+  if(((*pte) & (PTE_V)) == 0)
+    return 0;
+  // printf("judge here 1\n");
+  int ans = (*pte) & (PTE_COW);
+
+  return ans;
+
+}
+
+/*
+    为引发缺页中断的页表项分配物理内存以及映射
+    记得先将页表项的PTE_V标志位置0，否则会引发remap
+    旧页表项的标志位我们不和新页表项一起处理，当访问旧页表项时再回到这个函数统一处理，减少情况判断
+*/
+uint64 
+cow_copy(pagetable_t pagetable, uint64 va)
+{
+  if(cow_check(pagetable, va) == 0)
+    return 0;
+
+  va = PGROUNDDOWN(va);
+  pte_t *pte = walk(pagetable, va, 0);
+  uint64 pa = PTE2PA(*pte);
+
+
+  if(get_mem_ref(pa) == 1)
+  {
+    *pte = (*pte) & (~PTE_COW);
+    *pte = (*pte) | (PTE_W);
+    return pa;
+  }
+  else
+  {
+    char *mem = kalloc();
+    if(mem == 0){
+      return 0;
+    }
+
+    memmove(mem, (char *)pa, PGSIZE);
+    *pte = (*pte) & (~PTE_V);
+    uint64 flag = PTE_FLAGS(*pte);
+    flag = flag | PTE_W;
+    flag = flag & (~PTE_COW);
+
+
+    if(mappages(pagetable, va, PGSIZE, (uint64)mem, flag) != 0)
+    {
+      kfree(mem);
+      *pte = (*pte) | PTE_V;
+      return 0;
+    }
+
+    kfree((char*)PGROUNDDOWN(pa));
+
+    return (uint64)mem;
+
   }
 }
